@@ -1,0 +1,110 @@
+@startuml sequence-v2-engagement
+title Séquence v2 — phase 1 : dépôt d'un engagement scellé
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam sequence {
+  ArrowColor #555555
+  LifeLineBorderColor #999999
+  ParticipantBorderColor #1F4E79
+  ParticipantBackgroundColor White
+  ActorBorderColor #1F4E79
+  ActorBackgroundColor White
+  BoxBorderColor #CCCCCC
+  BoxBackgroundColor #FAFAFA
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+actor "Supporter" as SUP
+participant "Application\n(client)" as APP #D5F0E4
+participant "API Gateway" as GW
+participant "Bidding\nService" as BID
+database "PostgreSQL" as DB
+participant "Merkle\nService" as MK #D5F0E4
+participant "PSP" as PSP
+participant "Autorité\nd'horodatage" as TSA #D5F0E4
+
+SUP -> APP : saisit son montant maximal\net ses catégories acceptées
+
+group #D5F0E4 Calcul local — le montant ne quitte jamais l'appareil
+  APP -> APP : nonce <- aléa 256 bits
+  APP -> APP : c = HMAC-SHA256(nonce,\n"BIDv1|matchId|bidderId|montant|catégories")
+  APP -> APP : conserve le nonce localement\n+ escrow chiffré (clé libérée à la clôture)
+end
+
+APP -> GW : POST /commitments { c } + JWT
+activate GW
+GW -> GW : valide le JWT (RS256, 15 min)
+GW -> BID : depositCommitment(c, userId)
+activate BID
+
+group #FBE3D6 Transaction unique — l'autorité temporelle est le commit
+  BID -> DB : BEGIN
+  BID -> DB : SELECT match WHERE id = ? FOR SHARE
+  DB --> BID : status, bidding_closes_at
+
+  alt now() >= bidding_closes_at
+    BID --> GW : 409 — fenêtre close
+    note right of BID
+      La décision d'admission est prise **dans** la
+      transaction qui écrit l'engagement. Il n'existe
+      pas d'horloge globale : seule l'horloge de la
+      base fait foi, et la règle est publiée à l'avance.
+    end note
+  else fenêtre ouverte
+    BID -> DB : SELECT ... WHERE cin_pseudonym = ?\nAND superseded_by IS NULL
+    alt un engagement actif existe déjà
+      BID -> DB : UPDATE ... SET superseded_by = <nouveau>
+      note right of BID
+        Modification : l'ancien engagement est marqué
+        remplacé, le nouveau reçoit une commit_seq plus
+        élevée et perd donc sa priorité. Sans cette règle,
+        chacun déposerait un engagement bidon à l'ouverture
+        pour réserver son rang.
+      end note
+    end
+    BID -> PSP : preAuthorize(montant plafond)
+    PSP --> BID : authRef
+    BID -> DB : INSERT INTO bid_commitment\n(commitment, cin_pseudonym, payment_auth_ref)
+    DB --> BID : id, **commit_seq** (BIGSERIAL)
+    BID -> DB : COMMIT
+  end
+end
+
+BID -> MK : appendLeaf(matchId, c, commit_seq)
+activate MK
+MK -> MK : recalcule la racine (journal en ajout seul)
+MK --> BID : InclusionProof (18 condensés, 576 octets)
+deactivate MK
+
+BID --> GW : 201 Created { commitSeq, proof }
+deactivate BID
+GW --> APP : confirmation + preuve
+deactivate GW
+
+APP -> APP : stocke la preuve d'inclusion
+APP --> SUP : engagement enregistré,\npriorité n° <commitSeq>
+
+== Toutes les heures, en tâche de fond ==
+
+MK -> MK : racine courante R
+MK -> TSA : demande d'horodatage (RFC 3161)
+TSA --> MK : jeton horodaté
+MK -> DB : INSERT INTO merkle_anchor (root_hash, tsa_token)
+
+note over MK, TSA
+  **C'est l'ancrage externe qui ferme le problème phare de Vickrey.**
+  Une chaîne auto-vérifiée par celui qui la produit ne prouve rien :
+  l'exploitant peut tout recalculer hors ligne. Une racine publiée et
+  datée par un tiers pendant la fenêtre lui interdit d'insérer après
+  coup une enchère fantôme — attaque autrement profitable, invisible
+  et indémontrable. Le nombre d'engagements étant public, une
+  déclaration surnuméraire devient arithmétiquement détectable.
+end note
+
+@enduml

@@ -1,0 +1,77 @@
+@startuml use-case-v2-systeme
+title Cas d'utilisation v2 — ordonnanceur, administrateur et transparence
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam usecase {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam actor {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam rectangle {
+  BorderColor #999999
+  BackgroundColor #FCFCFC
+}
+
+left to right direction
+
+actor "Ordonnanceur\n«système»" as SCH #FFF4D6
+actor "Administrateur\n(club)" as ADM
+
+rectangle "Plateforme de billetterie dynamique — v2" {
+
+  usecase "Réconcilier la zone abonnés\net figer N(k)" as UC_RECON #D5F0E4
+  usecase "Publier et horodater\nla racine Merkle" as UC_ANCHOR #D5F0E4
+
+  usecase "Sceller la fenêtre\n(échéance publiée)" as UC_SEAL #FBE3D6
+  usecase "Traiter les révélations\net saisir les cautions" as UC_REVEALS #D5F0E4
+  usecase "Calculer les prix\nde clôture p*(k) = b(N+1)" as UC_PRICE #FBE3D6
+  usecase "Affecter les places\npar catégorie" as UC_ALLOC #D5F0E4
+  usecase "Départager les ex æquo\npar priorité temporelle" as UC_TIE #D5F0E4
+  usecase "Capturer les paiements\npar lots idempotents" as UC_CAPTURE #FBE3D6
+  usecase "Réattribuer en cascade\nles captures refusées" as UC_CASCADE #D5F0E4
+
+  usecase "Créer un match et\nsa grille de catégories" as UC_CREATE #FBE3D6
+  usecase "Suivre le nombre\nd'engagements" as UC_COUNT #FBE3D6
+  usecase "Consulter le rapport\npost-match" as UC_REPORT
+  usecase "Clôturer en mode incident\n(double validation)" as UC_INCIDENT #D5F0E4
+}
+
+actor "Autorité d'horodatage\n«externe»" as TSA
+actor "PSP\n«externe»" as PSP
+
+SCH --> UC_RECON
+SCH --> UC_ANCHOR
+SCH --> UC_SEAL
+SCH --> UC_CAPTURE
+
+ADM --> UC_CREATE
+ADM --> UC_COUNT
+ADM --> UC_REPORT
+ADM --> UC_INCIDENT
+
+UC_SEAL ..> UC_REVEALS : <<include>>
+UC_REVEALS ..> UC_PRICE : <<include>>
+UC_PRICE ..> UC_ALLOC : <<include>>
+UC_ALLOC ..> UC_TIE : <<include>>
+UC_CAPTURE .> UC_CASCADE : <<extend>>
+UC_INCIDENT .> UC_SEAL : <<extend>>
+
+UC_ANCHOR --> TSA
+UC_CAPTURE --> PSP
+
+
+
+legend bottom
+  |<back:#D5F0E4>      </back>| nouveau en v2 |
+  |<back:#FBE3D6>      </back>| modifié en v2 |
+  |<back:White>      </back>| inchangé |
+endlegend
+
+@enduml

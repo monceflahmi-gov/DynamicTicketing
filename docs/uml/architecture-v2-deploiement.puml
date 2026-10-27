@@ -1,0 +1,148 @@
+@startuml architecture-v2-deploiement
+title Architecture v2 — vue de déploiement et dimensionnement
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam node {
+  BorderColor #1F4E79
+  BackgroundColor #FCFCFC
+}
+skinparam component {
+  BorderColor #1F4E79
+  BackgroundColor White
+  FontSize 11
+}
+skinparam database {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+node "Terminaux" {
+  [Navigateur / mobile] as CLI
+}
+
+node "Entrée — Kubernetes" as INGRESS {
+  [Ingress NGINX\nTLS 1.3] as ING
+  [API Gateway\n**pré-provisionné à N=20**\n30 min avant l'échéance] as GW #FBE3D6
+}
+
+node "Services sans état — HPA" as STATELESS {
+  [Auth Service\n2 à 6 répliques] as AUTH
+  [Bidding Service\n**4 à 40 répliques**] as BID #FBE3D6
+  [Match Service\n2 répliques] as MATCH
+  [Ticket Service\n2 à 10 répliques] as TICK #D5F0E4
+  [Notification Service\n2 à 8 répliques] as NOTIF
+}
+
+node "Traitements singleton" as SINGLETON #FFF4D6 {
+  [Ordonnanceur\n**1 réplique + ShedLock**] as SCH #D5F0E4
+  [Pricing Engine\n1 réplique, pool de threads isolé] as PRICE #FBE3D6
+  [Merkle Service\n1 réplique, journal en ajout seul] as MK #D5F0E4
+}
+
+node "Travailleurs de lot" as WORKERS {
+  [Reveal Worker\n4 à 20 répliques] as REV #D5F0E4
+  [Capture Worker\n**lots de 2 000**\n4 à 20 répliques] as PAY #FBE3D6
+}
+
+node "Persistance" as DATA {
+  database "PostgreSQL 16\n**primaire**" as PG1 #FBE3D6
+  database "PostgreSQL 16\n**réplique synchrone**\nRPO = 0" as PG2 #D5F0E4
+  database "Redis 7\ncache non critique" as REDIS
+  queue "Kafka\n3 brokers" as KAFKA
+}
+
+node "Observabilité" as OBS {
+  [Prometheus + Grafana] as PROM
+  [Loki] as LOKI
+}
+
+cloud "Hors plateforme" as EXT {
+  [KMS / HSM] as KMS #D5F0E4
+  [Autorité d'horodatage] as TSA #D5F0E4
+  [PSP — CMI] as PSP
+}
+
+CLI --> ING
+ING --> GW
+GW --> AUTH
+GW --> BID
+GW --> MATCH
+GW --> TICK
+
+BID --> PG1
+BID --> MK
+BID --> KMS
+AUTH --> KMS
+MATCH --> REDIS
+MATCH --> PG1
+
+SCH --> PRICE
+SCH --> REV
+SCH --> PAY
+SCH --> MK
+PRICE --> PG1
+REV --> PG1
+PAY --> PG1
+PAY --> PSP
+MK --> TSA
+MK --> PG1
+
+PG1 --> PG2 : réplication synchrone
+BID --> KAFKA
+KAFKA --> NOTIF
+
+STATELESS ..> PROM
+SINGLETON ..> PROM
+WORKERS ..> LOKI
+
+note right of GW
+  **L'autoscaling ne protège pas d'un pic instantané.**
+  Détection 15 à 60 s, plus démarrage de pod et JVM
+  30 à 90 s, quand le pic dure 120 s : le renfort
+  arrive après. D'où le pré-provisionnement planifié,
+  et non une montée réactive.
+
+  Limitation de débit par compte authentifié et par
+  empreinte d'appareil, pas par IP : le CGNAT mobile
+  marocain fait partager une poignée d'adresses
+  publiques à des milliers d'abonnés.
+end note
+
+note right of SINGLETON
+  Réplique unique assumée. Un @Scheduled sur N pods
+  se déclencherait N fois, et deux calculs concurrents
+  de p* produiraient deux allocations divergentes.
+  ShedLock garantit l'exécution unique même pendant
+  un déploiement progressif.
+end note
+
+note bottom of PG2
+  Un RPO nul impose la réplication synchrone, pas des
+  sauvegardes nocturnes : perdre une déclaration, c'est
+  fausser p* et léser un supporter identifiable. La date
+  du match étant une contrainte physique, il n'existe pas
+  de « on recommencera demain ».
+end note
+
+note bottom of PAY
+  Chaque lot est une transaction courte et idempotente,
+  la clé vivant en PostgreSQL. Les captures refusées
+  déclenchent une réattribution en cascade au rang
+  suivant, selon la même règle de priorité.
+end note
+
+legend bottom
+  |<back:#D5F0E4>      </back>| nouveau en v2 |
+  |<back:#FBE3D6>      </back>| modifié en v2 |
+  |<back:White>      </back>| inchangé |
+endlegend
+
+@enduml

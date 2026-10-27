@@ -1,0 +1,111 @@
+@startuml class-domain-v2
+title Diagramme de classes v2 — noyau de tarification (paquet pricing.domain)
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam class {
+  BorderColor #1F4E79
+  BackgroundColor White
+  AttributeFontSize 11
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+class AllocationEngine <<service>> #FBE3D6 {
+  + {static} RANKING : Comparator<RankedBid>
+  --
+  + allocate(categories : List<Category>,\n  revealedBids : List<RankedBid>,\n  reservePrice : BigDecimal) : AllocationResult
+  - enforceMonotonicity(cats, prices) : void
+  - validateCategories(cats) : void
+}
+
+class Category <<record>> #D5F0E4 {
+  + code : String
+  + rank : int
+  + capacity : int
+  --
+  + isBetterThan(other : Category) : boolean
+  + compareTo(other : Category) : int
+}
+
+class RankedBid <<record>> #FBE3D6 {
+  + bidderId : String
+  + amount : BigDecimal
+  + commitSequence : long
+  + tieBreakHash : String
+  + acceptableCategories : Set<String>
+  --
+  + {static} acceptingAll(...) : RankedBid
+  + accepts(category : Category) : boolean
+}
+
+class BidOutcome <<record>> #D5F0E4 {
+  + bidderId : String
+  + rank : int
+  + declaredAmount : BigDecimal
+  + assignedCategory : Category
+  + pricePaid : BigDecimal
+  + reasonIfRejected : String
+  --
+  + isWinner() : boolean
+  + {static} winner(...) : BidOutcome
+  + {static} rejected(...) : BidOutcome
+}
+
+class AllocationResult <<record>> #FBE3D6 {
+  + clearingPrices : Map<String, BigDecimal>
+  + outcomes : List<BidOutcome>
+  + totalRevenue : BigDecimal
+  + winnerCount : int
+  + bidCount : int
+  --
+  + priceOf(categoryCode : String) : BigDecimal
+  + winners() : List<BidOutcome>
+  + losers() : List<BidOutcome>
+}
+
+AllocationEngine ..> Category : lit
+AllocationEngine ..> RankedBid : classe et affecte
+AllocationEngine ..> AllocationResult : produit
+AllocationResult "1" *-- "0..*" BidOutcome : contient
+BidOutcome "0..*" --> "0..1" Category : affectée
+RankedBid ..> Category : accepte
+
+note top of AllocationEngine
+  **Fonction pure.** Aucun accès base, aucune horloge,
+  aucun aléa non fourni en entrée. Mêmes entrées, même
+  sortie : la clôture est rejouable, donc auditable.
+
+  Aucune dépendance au-delà du JDK, d'où des tests
+  unitaires sans contexte Spring ni base de données.
+end note
+
+note bottom of AllocationEngine
+  **Prix par déplacement.** p*(k) = plus haute déclaration
+  parmi ceux qui acceptaient k et n'ont obtenu ni k ni mieux.
+  Avec une seule catégorie, cela redonne exactement b(N+1).
+
+  La règle b(N) de la v1 faisait payer au gagnant marginal
+  sa propre déclaration : surplus nul, dominance perdue.
+end note
+
+note right of RankedBid
+  **commitSequence** est l'autorité de priorité :
+  un BIGSERIAL attribué par la base à l'engagement,
+  jamais une horloge applicative. Une modification
+  réinsère un engagement, donc obtient une séquence
+  plus élevée et perd sa priorité.
+end note
+
+note right of Category
+  **rank** : 1 = meilleure catégorie.
+  L'ordre de désirabilité est publié avec le match,
+  jamais inféré au calcul.
+end note
+
+@enduml

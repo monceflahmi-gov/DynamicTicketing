@@ -1,0 +1,167 @@
+@startuml class-orchestration-v2
+title Diagramme de classes v2 — orchestration, persistance et paiement
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam class {
+  BorderColor #1F4E79
+  BackgroundColor White
+  AttributeFontSize 11
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+package "pricing (services)" {
+  class ClosureOrchestrator <<service>> #FBE3D6 {
+    - {static} WINDOW_MARGIN : int = 5000
+    - {static} CAPTURE_BATCH_SIZE : int = 2000
+    --
+    + sealWindow(matchId) : void  <<tx courte, verrou>>
+    + computeAllocation(matchId) : AllocationResult  <<sans tx>>
+    + persistAllocation(matchId, result) : void  <<tx courte>>
+    + captureAllWinners(matchId) : CaptureSummary  <<par lots>>
+    - loadWindow(matchId, n) : List<RankedBid>
+    - crossCheckAgainstSqlOrderStatistics(...) : void
+  }
+
+  class SubscriberZoneReconciler <<service>> #D5F0E4 {
+    + reconcileDueZones() : void  <<@Scheduled>>
+    + reconcile(matchId) : ReconciliationReport  <<tx>>
+  }
+}
+
+package "pricing (persistance)" {
+  interface BidCommitmentRepository <<repository>> #FBE3D6 {
+    + findOrderStatistic(matchId, offset) : BigDecimal
+    + findTopRanked(matchId, limit) : List<Entity>
+    + findCommitmentsInSequenceOrder(matchId) : List<byte[]>
+    + countValidReveals(matchId) : long
+    + markStrictWinners(matchId, categoryId, price) : int
+    + markTiedWinnersByPriority(matchId, categoryId,\n  price, remainingSeats) : int
+    + markRemainingAsOutbid(matchId) : int
+    + findNextCaptureBatch(matchId, batchSize) : List<Entity>
+  }
+
+  class BidCommitmentEntity <<entity>> #FBE3D6 {
+    + id : Long
+    + commitSeq : long  <<BIGSERIAL>>
+    + matchId : UUID
+    + cinPseudonym : byte[]
+    + commitment : byte[]
+    + revealedAmount : BigDecimal
+    + revealedNonce : byte[]
+    + revealStatus : RevealStatus
+    + supersededBy : Long
+    + depositForfeited : boolean
+    + paymentAuthRef : String
+    --
+    + toRankedBid() : RankedBid
+  }
+
+  class DynamicPool <<entity>> #D5F0E4 {
+    + matchId : UUID
+    + categoryId : UUID
+    + dynamicCapacity : int
+    + reservePrice : BigDecimal
+    + clearingPrice : BigDecimal
+  }
+
+  class SubscriberZone <<entity>> #D5F0E4 {
+    + matchId : UUID
+    + categoryId : UUID
+    + reservedSeats : int
+    + fixedPrice : BigDecimal
+    + confirmDeadline : Instant
+    + confirmedSeats : int
+    + reconciledAt : Instant
+  }
+
+  class MerkleAnchor <<entity>> #D5F0E4 {
+    + matchId : UUID
+    + treeSize : int
+    + rootHash : byte[]
+    + tsaToken : byte[]
+    + tsaAuthority : String
+    + anchoredAt : Instant
+  }
+}
+
+package "pricing.domain (voir diagramme dédié)" #FAFAFA {
+  class AllocationEngine <<service>> #FBE3D6 {
+    + allocate(categories, revealedBids,\n  reservePrice) : AllocationResult
+  }
+}
+
+package "payment" {
+  class IdempotencyGuard <<service>> #D5F0E4 {
+    + runOnce(key, operation, requestPayload,\n  action : Supplier<T>) : IdempotentOutcome<T>
+    + {static} captureKey(matchId, commitSeq, price) : String
+    + {static} releaseKey(matchId, commitSeq) : String
+    + {static} ticketKey(matchId, commitSeq) : String
+  }
+
+  class IdempotencyRecord <<entity>> #D5F0E4 {
+    + idempotencyKey : String  <<PK>>
+    + operation : Operation
+    + requestDigest : byte[]
+    + responsePayload : String
+    + createdAt : Instant
+  }
+
+  class PaymentCaptureService <<service>> #FBE3D6 {
+    + captureBatch(matchId, batch) : CaptureSummary
+    + cascadeReallocation(matchId, failedCount) : void
+  }
+}
+
+ClosureOrchestrator --> BidCommitmentRepository
+ClosureOrchestrator --> PaymentCaptureService
+ClosureOrchestrator ..> AllocationEngine : délègue le calcul
+SubscriberZoneReconciler --> SubscriberZone
+SubscriberZoneReconciler --> DynamicPool : fige N(k)
+BidCommitmentRepository ..> BidCommitmentEntity
+PaymentCaptureService --> IdempotencyGuard
+IdempotencyGuard --> IdempotencyRecord
+ClosureOrchestrator ..> MerkleAnchor : ancre la racine
+
+note top of ClosureOrchestrator
+  **Transactions courtes.** En v1, le verrou pessimiste
+  couvrait calcul, allocation et paiements, soit plusieurs
+  minutes : blocage du VACUUM, gonflement des tables,
+  connexions retenues au pire moment.
+
+  Ici le verrou ne couvre que le basculement de statut.
+  Le calcul se fait sans verrou, la persistance par UPDATE
+  ensembliste, les captures par lots indépendants.
+end note
+
+note bottom of BidCommitmentRepository
+  **findOrderStatistic** remplace le chargement intégral.
+  En v1 : findAll puis subList sur 200 000 entités
+  Hibernate, soit un OutOfMemoryError sur un pod de 512 Mo.
+
+  Ici : parcours d'un index B-tree déjà trié, une seule
+  valeur transférée. Mesuré à 745 ms pour 200 000
+  déclarations et 55 000 places.
+end note
+
+note right of IdempotencyGuard
+  Clé persistée en PostgreSQL, pas en Redis : Redis est
+  volatil et un redémarrage rouvrirait la fenêtre de
+  double débit. L'insertion partage la transaction de
+  l'effet métier, sinon la garantie est illusoire.
+end note
+
+note right of SubscriberZoneReconciler
+  N(k) est figé avant la clôture : les places d'abonnés
+  non confirmées rejoignent le pool dynamique de leur
+  catégorie, sinon elles restent vides alors que des
+  supporters ont été évincés au prix de clôture.
+end note
+
+@enduml

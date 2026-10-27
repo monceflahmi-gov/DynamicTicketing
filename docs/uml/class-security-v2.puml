@@ -1,0 +1,147 @@
+@startuml class-security-v2
+title Diagramme de classes v2 — scellement, transparence et sécurité
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam class {
+  BorderColor #1F4E79
+  BackgroundColor White
+  AttributeFontSize 11
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+package "pricing.commit" {
+  class BidCommitment <<utility>> #D5F0E4 {
+    - {static} HMAC : String = "HmacSHA256"
+    - {static} NONCE_BYTES : int = 32
+    --
+    + {static} canonicalPayload(matchId, bidderId,\n  amount, acceptableCategories) : String
+    + {static} newNonce() : byte[]
+    + {static} commit(nonce, matchId, bidderId,\n  amount, categories) : byte[]
+    + {static} verifyReveal(storedCommitment, nonce,\n  matchId, bidderId, amount, categories) : boolean
+  }
+}
+
+package "pricing.merkle" {
+  class MerkleTree #D5F0E4 {
+    - {static} LEAF_PREFIX : byte[] = 0x00
+    - {static} NODE_PREFIX : byte[] = 0x01
+    - leaves : List<byte[]>
+    - subtreeCache : Map<Long, byte[]>
+    - root : byte[]
+    --
+    + {static} of(commitments : List<byte[]>) : MerkleTree
+    + root() : byte[]
+    + rootHex() : String
+    + proofFor(index : int) : InclusionProof
+    + {static} verify(commitment, proof, expectedRoot) : boolean
+    + publishableStatement(matchId, isoInstant) : String
+    - subtreeHash(start : int, end : int) : byte[]
+  }
+
+  class InclusionProof <<record>> #D5F0E4 {
+    + leafIndex : int
+    + treeSize : int
+    + steps : List<Step>
+    --
+    + encode() : String
+  }
+
+  class Step <<record>> #D5F0E4 {
+    + siblingHash : byte[]
+    + siblingIsRight : boolean
+    --
+    + siblingHex() : String
+  }
+}
+
+package "security" {
+  class CinPseudonymizer #D5F0E4 {
+    - {static} CIN_FORMAT : Pattern
+    - macProvider : KeyedMacProvider
+    - keyVersion : String
+    --
+    + pseudonymize(rawCin : String) : Pseudonym
+  }
+
+  class Pseudonym <<record>> #D5F0E4 {
+    + value : byte[]
+    + keyVersion : String
+    --
+    + toHex() : String
+    + toString() : String
+  }
+
+  interface KeyedMacProvider <<interface>> #D5F0E4 {
+    + mac(payload : byte[]) : byte[]
+  }
+
+  class KmsMacProvider #D5F0E4 {
+    + mac(payload : byte[]) : byte[]
+  }
+
+  class RotatingTicketCode <<utility>> #D5F0E4 {
+    - {static} STEP_SECONDS : long = 30
+    - {static} DIGITS : int = 9
+    - {static} DRIFT_TOLERANCE_STEPS : int = 1
+    --
+    + {static} generate(totpSecret, ticketId,\n  epochSeconds) : String
+    + {static} verify(totpSecret, ticketId,\n  presentedCode, epochSeconds) : boolean
+    - {static} compute(totpSecret, ticketId, step) : String
+  }
+}
+
+MerkleTree ..> InclusionProof : produit et vérifie
+InclusionProof "1" *-- "0..*" Step
+MerkleTree ..> BidCommitment : feuilles = engagements
+CinPseudonymizer --> KeyedMacProvider : délègue
+CinPseudonymizer ..> Pseudonym : produit
+KmsMacProvider ..|> KeyedMacProvider
+
+note bottom of BidCommitment
+  **Engagement scellé.** c = HMAC-SHA256(nonce, charge).
+  Le nonce de 256 bits assure la dissimulation : sans lui,
+  H(450) serait trivialement inversible, les montants
+  plausibles en MAD ne comptant que quelques milliers
+  de valeurs. Le hachage assure la liaison.
+
+  matchId, bidderId et catégories sont dans la charge :
+  séparation de domaine contre le rejeu inter-match, la
+  revendication par un tiers, et la modification de
+  l'ensemble d'acceptation une fois la concurrence connue.
+end note
+
+note bottom of MerkleTree
+  **RFC 6962.** Deux détails sont des choix de sécurité :
+  préfixes 0x00 / 0x01 contre la seconde préimage, et
+  découpe à la puissance de deux inférieure au lieu de
+  dupliquer le nœud orphelin (CVE-2012-2459).
+
+  Journal en ajout seul : l'arbre ne fait que croître,
+  donc une preuve déjà remise reste valide.
+end note
+
+note right of KeyedMacProvider
+  La clé réside au KMS et n'en sort jamais.
+  Un SHA-256 salé globalement ne protégeait rien :
+  l'espace des CIN marocaines fait environ 2^30,
+  soit quelques secondes de GPU, contre 2^80 pour
+  un mot de passe fort. Le sel doit être global pour
+  préserver le déterminisme, donc il tombe avec le
+  serveur. D'où un secret inaccessible au système.
+end note
+
+note right of RotatingTicketCode
+  Une signature prouve l'authenticité, pas la fraîcheur.
+  Un QR signé statique est un jeton au porteur, copiable
+  à l'infini. Fraîcheur par pas de 30 s, et consommation
+  à usage unique côté serveur : les deux sont nécessaires.
+end note
+
+@enduml

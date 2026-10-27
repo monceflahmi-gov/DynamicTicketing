@@ -1,0 +1,163 @@
+@startuml sequence-v2-cloture
+title Séquence v2 — phase 2 : clôture, calcul de p* et allocation
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam sequence {
+  ArrowColor #555555
+  LifeLineBorderColor #999999
+  ParticipantBorderColor #1F4E79
+  ParticipantBackgroundColor White
+  ActorBorderColor #1F4E79
+  ActorBackgroundColor White
+  GroupBorderColor #999999
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+participant "Ordonnanceur" as SCH #FFF4D6
+participant "Subscriber\nZoneReconciler" as REC #D5F0E4
+participant "Closure\nOrchestrator" as ORC #FBE3D6
+participant "Merkle\nService" as MK #D5F0E4
+participant "Reveal\nService" as REV #D5F0E4
+database "PostgreSQL" as DB
+participant "Allocation\nEngine" as ENG #FBE3D6
+participant "Payment\nCaptureService" as PAY
+participant "PSP" as PSP
+
+== Avant la clôture : figer N(k) ==
+
+SCH -> REC : reconcileDueZones()
+activate REC
+REC -> DB : SELECT match FOR UPDATE
+REC -> DB : compte les abonnés confirmés par catégorie
+DB --> REC : confirmedSeats
+REC -> DB : UPDATE dynamic_pool\nSET dynamic_capacity = physique - confirmés
+deactivate REC
+
+note over REC, DB
+  Les places d'abonnés non confirmées rejoignent le pool
+  dynamique de leur catégorie. N(k) est définitif avant
+  le calcul : sinon des sièges restent vides alors que des
+  supporters ont été évincés au prix de clôture.
+end note
+
+== Étape 1 — scellement (transaction courte) ==
+
+SCH -> ORC : sealWindow(matchId)
+activate ORC
+ORC -> DB : BEGIN ; SELECT match FOR UPDATE
+ORC -> DB : UPDATE status = BIDDING_CLOSED ; COMMIT
+note right of ORC
+  Le verrou ne couvre que le basculement de statut,
+  soit quelques millisecondes. En v1 il était détenu
+  pendant tout le traitement : blocage du VACUUM et
+  connexions retenues au pire moment.
+end note
+deactivate ORC
+
+== Étape 2 — ancrage et révélations ==
+
+SCH -> ORC : computeAllocation(matchId)
+activate ORC
+ORC -> MK : anchorFinalRoot(matchId)
+MK --> ORC : racine finale horodatée
+
+ORC -> REV : processRevealWindow(matchId)
+activate REV
+loop pour chaque engagement actif
+  REV -> REV : recalcule HMAC(nonce, charge)
+  alt l'engagement correspond
+    REV -> DB : UPDATE reveal_status = VALID,\nrevealed_amount = montant
+  else non révélé ou incohérent
+    REV -> DB : UPDATE reveal_status = NOT_REVEALED,\ndeposit_forfeited = TRUE
+  end
+end
+deactivate REV
+
+note right of REV
+  La caution est saisie en cas d'abstention : sans cela,
+  ne pas révéler deviendrait un levier de manipulation
+  du prix de clôture.
+end note
+
+== Étape 3 — calcul (aucune transaction, fonction pure) ==
+
+ORC -> DB : findTopRanked(matchId, N + marge)
+note right of DB
+  Parcours de l'index (match_id, revealed_amount DESC,
+  commit_seq ASC). Fenêtre bornée : en v1, findAll puis
+  subList chargeait 200 000 entités Hibernate, soit un
+  OutOfMemoryError sur un pod de 512 Mo.
+end note
+DB --> ORC : fenêtre de déclarations classées
+
+ORC -> ENG : allocate(categories, bids, reservePrice)
+activate ENG
+ENG -> ENG : tri total : montant DESC,\ncommit_seq ASC, hash ASC
+ENG -> ENG : affectation assortative :\nmeilleure catégorie acceptée disponible
+ENG -> ENG : p*(k) = plus haute déclaration\nparmi les évincés de k ou mieux
+ENG -> ENG : impose p(VIP) >= p(Tribune) >= ...
+ENG --> ORC : AllocationResult
+deactivate ENG
+
+ORC -> DB : findOrderStatistic(matchId, cumul(k))
+DB --> ORC : b(cumul(k)+1)
+ORC -> ORC : vérification croisée moteur / SQL
+deactivate ORC
+
+== Étape 4 — persistance (transaction courte, ensembliste) ==
+
+SCH -> ORC : persistAllocation(matchId, result)
+activate ORC
+loop pour chaque catégorie k
+  ORC -> DB : UPDATE ... SET status = WINNER\nWHERE revealed_amount > p*(k)
+  DB --> ORC : nombre de gagnants stricts
+  ORC -> DB : UPDATE ... WHERE revealed_amount = p*(k)\nORDER BY commit_seq ASC LIMIT places_restantes
+  note right of DB
+    Départage des ex æquo exactement au prix :
+    priorité au premier ayant posé sa demande.
+    Avec des montants ronds, c'est le cas normal,
+    pas un cas limite.
+  end note
+  ORC -> DB : UPDATE dynamic_pool SET clearing_price = p*(k)
+end
+ORC -> DB : UPDATE ... SET status = OUTBID WHERE status = PENDING
+deactivate ORC
+
+== Étape 5 — captures par lots idempotents ==
+
+SCH -> ORC : captureAllWinners(matchId)
+activate ORC
+loop par lots de 2 000, chacun dans sa propre transaction
+  ORC -> PAY : captureBatch(matchId, lot)
+  activate PAY
+  PAY -> DB : INSERT INTO idempotency_record (clé)\n-- même transaction que l'effet
+  alt clé déjà présente
+    PAY -> PAY : rejeu neutralisé, aucun débit
+  else clé nouvelle
+    PAY -> PSP : capture(p*, idempotencyKey)
+    PSP --> PAY : résultat
+  end
+  PAY --> ORC : CaptureSummary
+  deactivate PAY
+end
+
+alt des captures ont échoué
+  ORC -> PAY : cascadeReallocation(matchId, nbÉchecs)
+  PAY -> DB : réattribue au rang suivant, même règle de priorité
+end
+deactivate ORC
+
+note over PAY, PSP
+  Kafka garantit une livraison « au moins une fois » : un accusé perdu
+  provoque un rejeu, donc un second débit réel. L'« exactement une fois »
+  ne s'obtient pas au transport mais en rendant le traitement idempotent,
+  avec la clé en PostgreSQL — Redis est volatil et rouvrirait la fenêtre.
+end note
+
+@enduml

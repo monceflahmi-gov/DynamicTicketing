@@ -1,0 +1,85 @@
+@startuml use-case-v2-supporter
+title Cas d'utilisation v2 — côté supporter et abonné
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam usecase {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam actor {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam rectangle {
+  BorderColor #999999
+  BackgroundColor #FCFCFC
+}
+
+left to right direction
+
+actor "Supporter" as SUP
+actor "Supporter abonné" as ABO
+ABO --|> SUP
+
+rectangle "Plateforme de billetterie dynamique — v2" {
+
+  usecase "S'inscrire\n(clé publique WebAuthn,\naucune biométrie serveur)" as UC_REG #FBE3D6
+  usecase "Consulter les matchs\net la grille de catégories" as UC_BROWSE #FBE3D6
+
+  usecase "Déposer un\nengagement scellé" as UC_COMMIT #FBE3D6
+  usecase "Déclarer les\ncatégories acceptées" as UC_CAT #D5F0E4
+  usecase "Autoriser le paiement\n(empreinte)" as UC_AUTH
+  usecase "Recevoir sa preuve\nd'inclusion Merkle" as UC_PROOF #D5F0E4
+
+  usecase "Modifier son engagement\n(réinitialise la priorité)" as UC_MODIFY #D5F0E4
+  usecase "Vérifier son inclusion\nhors ligne" as UC_VERIFY #D5F0E4
+
+  usecase "Révéler sa déclaration\n(automatique après clôture)" as UC_REVEAL #D5F0E4
+  usecase "Suivre le statut\nde sa déclaration" as UC_STATUS
+
+  usecase "Recevoir le\nbillet numérique" as UC_TICKET
+  usecase "Présenter un code\nrotatif de 30 s" as UC_CODE #FBE3D6
+
+  usecase "Réserver en zone abonnés\n(prix fixe et stable)" as UC_SUB
+  usecase "Confirmer sa venue\navant l'échéance" as UC_CONFIRM #D5F0E4
+}
+
+actor "Service WebAuthn\n«externe»" as WA
+actor "PSP\n«externe»" as PSP
+actor "Contrôle d'accès\n«externe»" as GATE
+
+SUP --> UC_REG
+SUP --> UC_BROWSE
+SUP --> UC_COMMIT
+SUP --> UC_MODIFY
+SUP --> UC_VERIFY
+SUP --> UC_REVEAL
+SUP --> UC_STATUS
+SUP --> UC_TICKET
+SUP --> UC_CODE
+
+ABO --> UC_SUB
+ABO --> UC_CONFIRM
+
+UC_COMMIT ..> UC_CAT : <<include>>
+UC_COMMIT ..> UC_AUTH : <<include>>
+UC_COMMIT ..> UC_PROOF : <<include>>
+UC_MODIFY .> UC_COMMIT : <<extend>>
+
+UC_REG --> WA
+UC_AUTH --> PSP
+UC_CODE --> GATE
+
+
+
+legend bottom
+  |<back:#D5F0E4>      </back>| nouveau en v2 |
+  |<back:#FBE3D6>      </back>| modifié en v2 |
+  |<back:White>      </back>| inchangé |
+endlegend
+
+@enduml

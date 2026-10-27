@@ -1,0 +1,145 @@
+@startuml architecture-v2-composants
+title Architecture v2 — vue logique des composants
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam component {
+  BorderColor #1F4E79
+  BackgroundColor White
+  FontSize 12
+}
+skinparam package {
+  BorderColor #AAAAAA
+  BackgroundColor #FCFCFC
+}
+skinparam database {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+package "Clients" {
+  [Application web\nReact 18 + Vite (PWA)] as WEB #D5F0E4
+  [Application mobile\nReact Native] as MOB #D5F0E4
+}
+
+note right of WEB
+  **Le client porte la cryptographie.**
+  Tirage du nonce, calcul de l'engagement
+  HMAC, conservation de la preuve
+  d'inclusion, vérification hors ligne.
+  Le montant ne quitte jamais l'appareil
+  avant la clôture.
+end note
+
+package "Périmètre d'entrée" {
+  [API Gateway\nSpring Cloud Gateway] as GW #FBE3D6
+}
+
+package "Services métier" {
+  [Auth Service\nWebAuthn / FIDO2, JWT] as AUTH #FBE3D6
+  [Match Service\nmatchs, catégories, fenêtres] as MATCH #FBE3D6
+  [Bidding Service\njournal d'engagements] as BID #FBE3D6
+  [Reveal Service\nvérification des révélations] as REV #D5F0E4
+  [Pricing Engine\nAllocationEngine (fonction pure)] as PRICE #FBE3D6
+  [Payment Service\ncaptures idempotentes] as PAY #FBE3D6
+  [Ticket Service\ncodes rotatifs, usage unique] as TICK #D5F0E4
+  [Notification Service\ne-mail, SMS, push] as NOTIF
+}
+
+package "Transparence et temps" {
+  [Merkle Service\narbre RFC 6962, preuves] as MK #D5F0E4
+  [Ordonnanceur\nShedLock, échéances publiées] as SCH #D5F0E4
+}
+
+package "Données" {
+  database "PostgreSQL 16\nprimaire + réplique synchrone" as DB #FBE3D6
+  database "Redis 7\ncache non critique" as REDIS #FBE3D6
+  queue "Apache Kafka\névénements, at-least-once" as KAFKA
+}
+
+package "Services externes" {
+  [KMS / HSM\nclé HMAC des CIN] as KMS #D5F0E4
+  [Autorité d'horodatage\nRFC 3161] as TSA #D5F0E4
+  [PSP — CMI\npaiement en MAD] as PSP
+  [Vérification CIN\nKYC] as KYC
+}
+
+' Contraintes de rang : impose la stratification clients -> entrée -> services -> données
+WEB -[hidden]down-> GW
+GW -[hidden]down-> BID
+BID -[hidden]down-> DB
+SCH -[hidden]right-> MK
+MK -[hidden]down-> TSA
+
+WEB --> GW : HTTPS / TLS 1.3
+MOB --> GW : HTTPS / TLS 1.3
+
+GW --> AUTH
+GW --> MATCH
+GW --> BID
+GW --> TICK
+
+AUTH --> KYC
+AUTH --> KMS : pseudonymise la CIN
+BID --> KMS : contrôle d'unicité
+BID --> MK : appendLeaf
+BID --> PSP : empreinte de paiement
+BID --> DB
+MATCH --> DB
+REV --> DB
+PRICE --> DB
+PAY --> DB
+PAY --> PSP : capture idempotente
+TICK --> DB
+MK --> DB
+MK --> TSA : ancrage horaire
+
+SCH --> MATCH : réconcilie la zone abonnés
+SCH --> PRICE : scelle, calcule, persiste
+SCH --> MK : ancre la racine finale
+SCH --> REV : traite les révélations
+SCH --> PAY : lance les lots de capture
+
+BID --> KAFKA
+PRICE --> KAFKA
+PAY --> KAFKA
+KAFKA --> NOTIF
+MATCH --> REDIS
+
+note bottom of PRICE
+  Le noyau de calcul ne dépend que du JDK :
+  ni base, ni horloge, ni aléa non fourni.
+  Les statistiques d'ordre sont évaluées par
+  PostgreSQL, pas en mémoire applicative.
+end note
+
+note bottom of REDIS
+  **Rôle réduit en v2.** Plus de clés
+  d'idempotence — Redis est volatil et un
+  redémarrage rouvrirait la fenêtre de double
+  débit. Plus de courbe de demande non plus :
+  les montants sont scellés pendant la fenêtre.
+  Il ne reste que du cache non critique.
+end note
+
+note bottom of SCH
+  La clôture est déclenchée par l'échéance
+  publiée, jamais par un administrateur.
+  Réplique unique, ou verrou ShedLock : un
+  @Scheduled sur N pods se déclencherait N fois.
+end note
+
+legend bottom
+  |<back:#D5F0E4>      </back>| composant nouveau en v2 |
+  |<back:#FBE3D6>      </back>| composant modifié en v2 |
+  |<back:White>      </back>| inchangé |
+endlegend
+
+@enduml

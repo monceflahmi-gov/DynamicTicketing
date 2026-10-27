@@ -1,0 +1,97 @@
+@startuml architecture-v2-confiance
+title Architecture v2 — frontières de confiance et racines de confiance
+
+skinparam backgroundColor White
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam rectangle {
+  BorderColor #1F4E79
+  FontSize 12
+}
+skinparam component {
+  BorderColor #1F4E79
+  BackgroundColor White
+}
+skinparam note {
+  BackgroundColor #FFFBE6
+  BorderColor #CCB870
+}
+
+rectangle "Zone 1 — Appareil du supporter" #E8F4FB {
+  [Authentificateur WebAuthn\nclé privée, biométrie locale] as AUTHN
+  [Nonce de 256 bits] as NONCE
+  [Engagement c = HMAC(nonce, charge)] as COMMIT
+  [Preuve d'inclusion Merkle] as PROOF
+}
+
+rectangle "Zone 2 — Réseau public" #F5F5F5 {
+  [TLS 1.3] as TLS
+}
+
+rectangle "Zone 3 — Plateforme (NON digne de confiance)" #FDEEEA {
+  [Microservices Spring Boot] as SVC
+  [PostgreSQL — engagements scellés] as PG
+  [Administrateurs, DBA, comptes de service] as OPS
+}
+
+rectangle "Zone 4 — Racines de confiance externes" #E6F6EC {
+  [Autorité d'horodatage\nRFC 3161] as TSA
+  [KMS / HSM\nclé HMAC non extractible] as KMS
+  [Publication de la racine Merkle] as PUB
+}
+
+AUTHN --> TLS
+COMMIT --> TLS
+TLS --> SVC
+SVC --> PG
+OPS ..> PG : accès complet en lecture
+
+SVC --> KMS : demande un calcul HMAC
+SVC --> TSA : fait horodater la racine
+SVC --> PUB : publie la racine toutes les heures
+PROOF <.. PUB : vérification hors ligne\npar le supporter
+
+note right of OPS
+  **L'exploitant est l'adversaire pertinent.**
+  C'est le problème phare de l'enchère de Vickrey :
+  le vendeur a un intérêt direct, mesurable et presque
+  indétectable à insérer une enchère fantôme sous la
+  plus haute offre. L'attaque est profitable, invisible
+  et indémontrable, et c'est pourquoi ces enchères sont
+  rares dans la pratique.
+end note
+
+note bottom of PG
+  Ce que la zone 3 détient : des condensés HMAC.
+  Ce qu'elle ne peut pas faire :
+  — lire un montant avant la révélation
+  — énumérer les CIN (la clé est en zone 4)
+  — réécrire le journal (la racine est déjà datée)
+  — insérer une enchère (le compte est public)
+end note
+
+note bottom of KMS
+  La clé ne sort jamais. Le service peut demander
+  un calcul, jamais l'extraire, donc jamais énumérer
+  hors ligne les 2^30 CIN marocaines possibles.
+end note
+
+note bottom of TSA
+  L'ancrage daté est ce qui transforme le journal en
+  preuve. Une structure d'intégrité auto-vérifiée par
+  celui qui la produit ne prouve rien : l'exploitant
+  peut tout recalculer hors ligne et publier un
+  condensé final parfaitement cohérent.
+end note
+
+note top of NONCE
+  Inversion caractéristique de cette architecture :
+  le secret qui protège le mécanisme est confié au
+  client, pas au serveur. Un escrow chiffré, dont la
+  clé n'est libérée qu'à la clôture, couvre la perte
+  d'appareil sans rompre le scellement.
+end note
+
+@enduml
